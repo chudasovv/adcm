@@ -12,7 +12,7 @@
 
 """Test designed to check LDAP filters"""
 
-from typing import Set
+from typing import Set, Tuple
 
 import allure
 import pytest
@@ -24,99 +24,131 @@ from tests.functional.conftest import only_clean_adcm
 from tests.functional.ldap_auth.utils import (
     SYNC_ACTION_NAME,
     check_existing_groups,
-    login_should_succeed,
+    login_should_succeed, check_existing_users, DEFAULT_LOCAL_USERS, get_ldap_group_from_adcm,
+    get_ldap_user_from_adcm,
 )
 
 # pylint: disable=redefined-outer-name
 
+
+pytestmark = [pytest.mark.ldap(), only_clean_adcm]
 UserInfo = dict
 GroupInfo = dict
 
-pytestmark = [pytest.mark.ldap(), only_clean_adcm]
+
+@pytest.fixture()
+def two_ldap_groups_with_users(ldap_ad, ldap_basic_ous) -> Tuple[GroupInfo, UserInfo, GroupInfo, UserInfo]:
+    """Create two ldap users and groups with a user in each one"""
+    groups_ou, users_ou = ldap_basic_ous
+    group_1 = {'name': 'group-with-users-1'}
+    group_2 = {'name': 'group-with-users-2'}
+    user_1 = {'name': f'user-1-{random_string(4)}-in-group', 'password': random_string(12)}
+    user_2 = {'name': f'user-2-{random_string(4)}-in-group', 'password': random_string(12)}
+    user_1['dn'] = ldap_ad.create_user(**user_1, custom_base_dn=users_ou)
+    user_2['dn'] = ldap_ad.create_user(**user_2, custom_base_dn=users_ou)
+    group_1['dn'] = ldap_ad.create_group(**group_1, custom_base_dn=groups_ou)
+    ldap_ad.add_user_to_group(user_1['dn'], group_1['dn'])
+    group_2['dn'] = ldap_ad.create_group(**group_2, custom_base_dn=groups_ou)
+    ldap_ad.add_user_to_group(user_2['dn'], group_2['dn'])
+    return group_1, user_1, group_2, user_2
 
 
-def create_adcm_users(sdk_client_fs: ADCMClient, user_name: str) -> User:
-    """Create ADCM user"""
-    return sdk_client_fs.user_create(user_name, random_string(12))
+@pytest.fixture()
+def two_ldap_users(ldap_ad, ldap_basic_ous) -> Tuple[UserInfo, UserInfo]:
+    """Create two ldap user that're not in any group"""
+    _, users_ou = ldap_basic_ous
+    user_1 = {'name': f'user-3-{random_string(4)}', 'password': random_string(12)}
+    user_2 = {'name': f'user-4-{random_string(4)}', 'password': random_string(12)}
+    user_1['dn'] = ldap_ad.create_user(**user_1, custom_base_dn=users_ou)
+    user_2['dn'] = ldap_ad.create_user(**user_2, custom_base_dn=users_ou)
+    return user_1, user_2
 
 
-def create_adcm_group(sdk_client_fs: ADCMClient, group_name: str) -> Group:
-    """Create ADCM group"""
-    return sdk_client_fs.group_create(group_name)
+@pytest.fixture()
+def two_adcm_users(sdk_client_fs) -> Tuple[User, User]:
+    """Create two ADCM users"""
+    return (
+        sdk_client_fs.user_create('first-adcm-user', random_string(12)),
+        sdk_client_fs.user_create('second-adcm-user', random_string(12)),
+    )
 
 
-def create_ldap_user(ldap_ad, user_name, users_ou) -> UserInfo:
-    """Create LDAP user"""
-    user = {'name': user_name, 'password': random_string(12)}
-    user['dn'] = ldap_ad.create_user(**user, custom_base_dn=users_ou)
-    return user
-
-
-def create_ldap_group(ldap_ad, group_name, groups_ou) -> GroupInfo:
-    """Create LDAP user"""
-    group = {'name': group_name}
-    group['dn'] = ldap_ad.create_group(**group, custom_base_dn=groups_ou)
-    return group
-
-
-def add_user_to_group_ldap(ldap_ad, user_dn, group_dn) -> None:
-    """Add LDAP user to LDAP group"""
-    ldap_ad.add_user_to_group(user_dn, group_dn)
+@pytest.fixture()
+def two_adcm_groups(sdk_client_fs) -> Tuple[Group, Group]:
+    """Create two ADCM groups"""
+    return sdk_client_fs.group_create('first-adcm-group'), sdk_client_fs.group_create('second-adcm-group')
 
 
 @pytest.mark.usefixtures('configure_adcm_ldap_ad')
 # pylint: disable-next=too-many-arguments, too-many-locals, too-many-statements
-def test_filter(sdk_client_fs, ldap_ad, ldap_basic_ous):
+def test_filter_user(sdk_client_fs, ldap_ad, ldap_basic_ous,
+                     two_adcm_users, two_adcm_groups, two_ldap_groups_with_users):
     """
-    Test designed to check LDAP filters
+    Test designed to check LDAP filters for user
     Scenario:
-    Step 1. Create ADCM 2 user and 1 ADCM group
-    Step 2. Add 1 ADCM user to ADCM group
-    Step 3. Create 2 LDAP users and 2 LDAP groups
-    Step 4. Add first LDAP user to both LDAP groups add second LDAP user to 1 group
-    Step 5. Check filters to search by LDAP groups
-    Step 6. Check filters to search by LDAP users
+    Step 1. Create 1 ADCM user
+    Step 2. Create 1 LDAP users
+    Step 3. Check filters for LDAP user
+    Step 4. Check LDAP user and ADCM user
     """
-    # Create ADCM users and group
+    filters_res = {}
+
     sdk_client_fs.adcm().config_set_diff({'ldap_integration': {'sync_interval': 0}})
-    adcm_user_1 = create_adcm_users(sdk_client_fs, 'first-adcm-user')
-    adcm_user_2 = create_adcm_users(sdk_client_fs, 'second-adcm-user')
-    adcm_group_1 = create_adcm_group(sdk_client_fs, 'first-adcm-group')
-
-    # Create LDAP users and group
-    groups_ou, users_ou = ldap_basic_ous
-    ldap_user_1 = create_ldap_user(ldap_ad, f'user-1-{random_string(4)}-in-group', users_ou)
-    ldap_group_1 = create_ldap_group(ldap_ad, 'group-with-users-1', groups_ou)
-    add_user_to_group_ldap(ldap_ad, ldap_user_1['dn'], ldap_group_1['dn'])
-
-    ldap_user_2 = create_ldap_user(ldap_ad, f'user-2-{random_string(4)}-in-group', users_ou)
-    ldap_group_2 = create_ldap_group(ldap_ad, 'group-with-users-2', groups_ou)
-    add_user_to_group_ldap(ldap_ad, ldap_user_2['dn'], ldap_group_2['dn'])
-    add_user_to_group_ldap(ldap_ad, ldap_user_1['dn'], ldap_group_2['dn'])
+    adcm_user_1, adcm_user_2 = two_adcm_users
+    adcm_user_names = {adcm_user_1.username, adcm_user_2.username, *DEFAULT_LOCAL_USERS}
+    adcm_group_1, adcm_group_2 = two_adcm_groups
+    group_info_1, user_info_1, group_info_2, user_info_2 = two_ldap_groups_with_users
 
     with allure.step('Add ADCM users to ADCM groups'):
         adcm_group_1.add_user(adcm_user_1)
+        adcm_group_2.add_user(adcm_user_2)
     with allure.step('Sync and add LDAP users to ADCM groups'):
         _run_sync(sdk_client_fs)
-        check_existing_groups(sdk_client_fs,
-                              {ldap_group_1['name'], ldap_group_2['name']},
-                              {adcm_group_1.name})
+        check_existing_groups(
+            sdk_client_fs, {group_info_1['name'], group_info_2['name']}, {adcm_group_1.name, adcm_group_2.name}
+        )
+        check_existing_users(sdk_client_fs, {user_info_1['name'], user_info_2['name']}, adcm_user_names)
 
-    with allure.step("Create user and deactivate it"):
-        filter_str = f"(&(objectcategory=person)(objectclass=person)(name={ldap_user_1}))"
-        res = ldap_ad.set_filter(base=ldap_user_1['dn'], filterstr=filter_str)
+        ldap_group_1 = get_ldap_group_from_adcm(sdk_client_fs, group_info_1['name'])
+        ldap_group_2 = get_ldap_group_from_adcm(sdk_client_fs, group_info_2['name'])
+        ldap_user_1 = get_ldap_user_from_adcm(sdk_client_fs, user_info_1['name'])
+        ldap_user_2 = get_ldap_user_from_adcm(sdk_client_fs, user_info_2['name'])
 
-        # check_existing_users(sdk_client_fs, {user_info_1['name'], user_info_2['name']}, adcm_user_names)
-        # ldap_group_1 = get_ldap_group_from_adcm(sdk_client_fs, group_info_1['name'])
-        # ldap_group_2 = get_ldap_group_from_adcm(sdk_client_fs, group_info_2['name'])
-        # ldap_user_1 = get_ldap_user_from_adcm(sdk_client_fs, user_info_1['name'])
-        # ldap_user_2 = get_ldap_user_from_adcm(sdk_client_fs, user_info_2['name'])
-        # adcm_group_1.add_user(ldap_user_1)
-        # adcm_group_2.add_user(ldap_user_2)
-        # _check_users_in_group(ldap_group_1, ldap_user_1)
-        # _check_users_in_group(adcm_group_1, adcm_user_1, ldap_user_1)
-        # _check_users_in_group(ldap_group_2, ldap_user_2)
-        # _check_users_in_group(adcm_group_2, adcm_user_2, ldap_user_2)
+        adcm_group_1.add_user(ldap_user_1)
+        adcm_group_2.add_user(ldap_user_2)
+
+        _check_users_in_group(ldap_group_1, ldap_user_1)
+        _check_users_in_group(adcm_group_1, adcm_user_1, ldap_user_1)
+        _check_users_in_group(ldap_group_2, ldap_user_2)
+        _check_users_in_group(adcm_group_2, adcm_user_2, ldap_user_2)
+
+    with allure.step('Sync and check filter'):
+        groups_ou, users_ou = ldap_basic_ous
+        filter_user = f"(&(objectcategory=person)(objectclass=person)(name={ldap_user_1.username}))"
+        filters_res[filter_user] = ldap_ad.set_filter(base=users_ou, filterstr=filter_user)
+        _run_sync(sdk_client_fs)
+
+        filter_group = f"(&(objectclass=group)(name={ldap_group_1.name}))"
+        filters_res[filter_group] = ldap_ad.set_filter(base=groups_ou, filterstr=filter_group)
+        _run_sync(sdk_client_fs)
+
+        filter_adcm_user = f"(&(objectcategory=person)(objectclass=person)(name={adcm_user_1.username}))"
+        filters_res[filter_adcm_user] = ldap_ad.set_filter(base=users_ou, filterstr=filter_adcm_user)
+        _run_sync(sdk_client_fs)
+
+        filter_adcm_group = f"(&(objectclass=group)(name={adcm_group_1.name}))"
+        filters_res[filter_adcm_group] = ldap_ad.set_filter(base=groups_ou, filterstr=filter_adcm_group)
+        _run_sync(sdk_client_fs)
+
+        check_existing_groups(
+            sdk_client_fs, {group_info_1['name'], group_info_2['name']}, {adcm_group_1.name, adcm_group_2.name}
+        )
+        check_existing_users(sdk_client_fs, {user_info_1['name'], user_info_2['name']}, adcm_user_names)
+        _check_users_in_group(ldap_group_1, ldap_user_1)
+
+    with allure.step('Check both LDAP users can login'):
+        for user_info in (user_info_1, user_info_2):
+            _check_login_succeed(sdk_client_fs, user_info)
 
 
 def _check_login_succeed(client: ADCMClient, user_info: dict):

@@ -199,8 +199,7 @@ class LDAPEntityManager:
     @allure.step('Set filter "{filterstr}"')
     def set_filter(self, base, filterstr: str, score=ldap.SCOPE_SUBTREE):
         """Use filter for search"""
-        res = self.conn.search_s(base, score, filterstr)
-        return res
+        return self.conn.search_s(base, score, filterstr)
 
     def _get_entities_from_test_ou(self):
         try:
